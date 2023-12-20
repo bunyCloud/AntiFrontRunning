@@ -44,6 +44,9 @@ contract AntiFrontRunning is Ownable {
     bool private locked;
     bool public stopped = false;
 
+    event Received(address sender, uint amount);
+
+
     modifier noReentrant() {
         require(!locked, "No reentrancy");
         locked = true;
@@ -56,6 +59,15 @@ contract AntiFrontRunning is Ownable {
         _;
     }
 
+        fallback() external payable {
+        emit Received(msg.sender, msg.value);
+    }
+
+
+        receive() external payable {
+            emit Received(msg.sender, msg.value);
+        }
+
     function setMaxGasPrice(uint256 _maxGasPrice) public onlyOwner {
         maxGasPrice = _maxGasPrice;
     }
@@ -65,6 +77,8 @@ contract AntiFrontRunning is Ownable {
     }
 
     Transaction[] public transactionQueue;
+
+  
 
     // Commit a transaction to the queue
     function commitTransaction(bytes memory data, uint256 priority) public {
@@ -77,6 +91,22 @@ contract AntiFrontRunning is Ownable {
             priority: priority
         });
         transactionQueue.push(newTx);
+    }
+
+       function findNextTransactionToExecute() private view returns (uint256 index, bool found) {
+        uint256 highestPriority = type(uint256).max;
+        uint256 highestPriorityIndex;
+        bool foundHighest = false;
+
+        for (uint256 i = 0; i < transactionQueue.length; i++) {
+            if (!transactionQueue[i].executed && transactionQueue[i].priority < highestPriority) {
+                highestPriority = transactionQueue[i].priority;
+                highestPriorityIndex = i;
+                foundHighest = true;
+            }
+        }
+
+        return (highestPriorityIndex, foundHighest);
     }
 
     function sortTransactionQueue() private {
@@ -94,17 +124,12 @@ contract AntiFrontRunning is Ownable {
         }
     }
 
-    function executeBatchTransactions(uint256[] memory indices)
-        public
-        noReentrant
-        stopInEmergency
-    {
+    function executeBatchTransactions(uint256[] memory indices) public noReentrant stopInEmergency {
         for (uint256 i = 0; i < indices.length; i++) {
-            uint256 index = indices[i];
-            // Call executeTransaction for each index
-            executeTransaction(index);
+            executeTransaction(indices[i]);
         }
     }
+
 
     // Execute transaction after time lock delay
     function executeTransaction(uint256 index)
@@ -112,8 +137,11 @@ contract AntiFrontRunning is Ownable {
         noReentrant
         stopInEmergency
     {
+        (uint256 highestPriorityIndex, bool found) = findNextTransactionToExecute();
+        require(found, "No executable transaction found");
         require(index < transactionQueue.length, "Invalid transaction index");
-        Transaction storage txToExecute = transactionQueue[index];
+        Transaction storage txToExecute = transactionQueue[highestPriorityIndex];
+        require(index == highestPriorityIndex, "Transaction is not the highest priority");
         require(!txToExecute.executed, "Transaction already executed");
         require(
             block.timestamp >= txToExecute.timestamp,
